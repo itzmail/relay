@@ -5,6 +5,7 @@ mod adapters;
 mod config;
 mod context;
 mod runner;
+mod setup;
 
 #[derive(Parser)]
 #[command(name = "relay", about = "AI agent executor for Claude Code")]
@@ -50,6 +51,18 @@ enum Commands {
         #[command(subcommand)]
         cmd: ConfigCommands,
     },
+
+    /// Set up relay for an AI coding agent host
+    Setup {
+        /// Target host (e.g. claude-code)
+        target: Option<String>,
+        /// Inject into global config instead of project-local
+        #[arg(long)]
+        global: bool,
+        /// List supported targets
+        #[arg(long)]
+        list: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -85,6 +98,15 @@ async fn main() -> Result<()> {
         Commands::Config { cmd } => match cmd {
             ConfigCommands::Show => runner::config_show()?,
         },
+        Commands::Setup { target, global, list } => {
+            if list {
+                setup::list_targets();
+            } else if let Some(t) = target {
+                setup::run_setup(&t, global)?;
+            } else {
+                setup::list_targets();
+            }
+        }
     }
 
     Ok(())
