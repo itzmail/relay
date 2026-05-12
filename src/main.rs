@@ -18,13 +18,25 @@ enum Commands {
     /// Initialize relay.config.yaml interactively
     Init,
 
-    /// Run an agent with a task and context
+    /// Show execution plan and ask for confirmation before running
+    Plan {
+        agent: String,
+        #[arg(long)]
+        task: String,
+        #[arg(long, default_value = "")]
+        context: String,
+    },
+
+    /// Run an agent with a task and context (non-interactive)
     Run {
         agent: String,
         #[arg(long)]
         task: String,
         #[arg(long, default_value = "")]
         context: String,
+        /// Override model from config
+        #[arg(long)]
+        model: Option<String>,
     },
 
     /// Agent management subcommands
@@ -59,8 +71,11 @@ async fn main() -> Result<()> {
         Commands::Init => {
             runner::init().await?;
         }
-        Commands::Run { agent, task, context } => {
-            let output = runner::run(&agent, &task, &context).await?;
+        Commands::Plan { agent, task, context } => {
+            runner::plan(&agent, &task, &context).await?;
+        }
+        Commands::Run { agent, task, context, model } => {
+            let output = runner::run(&agent, &task, &context, model.as_deref()).await?;
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         Commands::Agent { cmd } => match cmd {
