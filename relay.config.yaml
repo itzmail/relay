@@ -1,0 +1,13 @@
+agents:
+  codex:
+    command: codex
+    enabled: true
+    default_model: o4-mini
+  opencode:
+    command: opencode
+    enabled: true
+    default_model: github-copilot/gpt-5.4-mini
+  copilot:
+    command: copilot
+    enabled: true
+    default_model: gpt-4o
