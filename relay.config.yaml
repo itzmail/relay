@@ -10,4 +10,4 @@ agents:
   copilot:
     command: copilot
     enabled: true
-    default_model: gpt-4o
+    default_model: claude-haiku-4.5
