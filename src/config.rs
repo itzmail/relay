@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
 
 pub const CONFIG_FILE: &str = "relay.config.yaml";
 
@@ -41,8 +40,4 @@ impl RelayConfig {
             )
         })
     }
-}
-
-pub fn config_exists() -> bool {
-    Path::new(CONFIG_FILE).exists()
 }

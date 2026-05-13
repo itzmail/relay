@@ -4,6 +4,7 @@ use std::process::Command;
 
 use crate::adapters::{get_adapter, KNOWN_AGENTS};
 use crate::config::RelayConfig;
+use crate::context::{write_temp_context, delete_temp_context};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AgentOutput {
@@ -70,9 +71,12 @@ pub async fn run(agent_name: &str, task: &str, context: &str, model_override: Op
 
     let adapter = get_adapter(agent_name, &agent_cfg)?;
 
+    let ctx_path = write_temp_context(context)?;
     let before = git_snapshot();
-    let result = adapter.run(task, context)?;
+    let result = adapter.run(task, context);
     let after = git_snapshot();
+    delete_temp_context(&ctx_path);
+    let result = result?;
     let modified_files = compute_modified(before, after);
 
     Ok(AgentOutput {
