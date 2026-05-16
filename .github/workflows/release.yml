@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: relay
+            archive: relay-linux-x86_64.tar.gz
+
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: relay
+            archive: relay-macos-aarch64.tar.gz
+
+          - target: x86_64-apple-darwin
+            os: macos-13
+            artifact: relay
+            archive: relay-macos-x86_64.tar.gz
+
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: relay.exe
+            archive: relay-windows-x86_64.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact }} relay
+          tar czf ${{ matrix.archive }} relay
+          sha256sum ${{ matrix.archive }} > ${{ matrix.archive }}.sha256
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.artifact }}" "relay.exe"
+          Compress-Archive -Path relay.exe -DestinationPath ${{ matrix.archive }}
+          (Get-FileHash ${{ matrix.archive }} -Algorithm SHA256).Hash | Out-File "${{ matrix.archive }}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: |
+            ${{ matrix.archive }}
+            ${{ matrix.archive }}.sha256
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.tar.gz
+            *.zip
+            *.sha256
+          generate_release_notes: true
