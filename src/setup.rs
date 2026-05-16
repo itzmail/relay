@@ -5,7 +5,7 @@ use std::path::PathBuf;
 const CLAUDE_CODE_MARKER_START: &str = "<!-- relay:start -->";
 const CLAUDE_CODE_MARKER_END: &str = "<!-- relay:end -->";
 
-const SKILL_CONTENT: &str = r#"---
+const SKILL_RELAY_INIT: &str = r#"---
 name: relay-init
 description: Initialize Relay for this project — detect available agents, select models, generate relay.config.yaml, and inject relay instructions into CLAUDE.md
 ---
@@ -36,6 +36,66 @@ description: Initialize Relay for this project — detect available agents, sele
 - `relay.config.yaml` is created in current working directory (project root).
 - If relay.config.yaml already exists, ask user whether to overwrite.
 - KNOWN_AGENTS order for `relay init` prompts: opencode, codex, copilot, pi.
+"#;
+
+const SKILL_RELAY_PLAN: &str = r#"---
+name: relay-plan
+description: Orchestrate a task using Relay — break into subtasks, assign agents, get user approval, execute in parallel, review results, and close or fix.
+---
+
+## Steps
+
+### 1. Generate plan
+
+First, run `relay agent list` to see which agents are enabled and available.
+
+Then, using your own reasoning, break the user's task into subtasks. For each subtask, decide:
+- Which agent is best suited (`opencode`, `codex`, `copilot`, or `pi`)
+- What the specific task is
+- Why that agent was chosen
+
+### 2. Present plan to user
+
+Show the plan clearly — list each subtask, which agent will handle it, and why.
+Ask for approval via AskUserQuestion before proceeding.
+
+**Wait for user confirmation. Do not proceed without approval.**
+
+### 3. Execute in parallel
+
+After approval, spawn all agents in a **single response** using multiple Bash tool calls simultaneously (not sequentially):
+
+```bash
+relay run <agent1> --task "<task1>" --context "<context>"
+relay run <agent2> --task "<task2>" --context "<context>"
+```
+
+Each call blocks until the agent finishes. Running them in parallel cuts total wall time.
+
+### 4. Summarize and review
+
+After all agents finish:
+- Briefly summarize each agent's output (use your built-in summarization — no separate LLM call needed)
+- Read the modified files
+- Verify correctness against the original task
+
+### 5. Fix or close
+
+- **Incorrect or incomplete**: fix it yourself, or spawn a targeted agent for the specific issue
+- **All correct**: report results to user and close the session
+
+## Notes
+
+- Context format for `--context`:
+  ```
+  Goal: <overall goal>
+  Done: <what's already done>
+  Why: <key decisions made>
+  Modified: <files already changed>
+  Avoid: <things that failed, don't retry>
+  ```
+- You are the decision maker. Relay is the executor.
+- Never delegate decision-making to agents — only delegate implementation.
 "#;
 
 pub fn setup_claude_code(global: bool) -> Result<()> {
@@ -90,18 +150,56 @@ fn claude_md_path(global: bool) -> Result<PathBuf> {
 fn relay_instructions_block() -> String {
     format!(
         "{}\n## Relay (AI Agent Executor)\n\
-Relay delegates coding tasks to other AI agents (opencode, codex, copilot, pi).\n\
-Use it when a task benefits from a specialized agent or parallel execution.\n\
+\n\
+Relay delegates coding tasks to specialized AI agents (opencode, codex, copilot, pi).\n\
+You are the **decision maker**. Relay is your executor.\n\
+\n\
+### When to use Relay\n\
+\n\
+- Task is clearly scoped and delegatable (implement X, write tests for Y, refactor Z)\n\
+- Task can run independently without your direct involvement\n\
+- Multiple independent subtasks exist that can run in parallel\n\
+\n\
+### Orchestration Flow\n\
+\n\
+**1. Plan** — run `/relay-plan` or manually:\n\
+```bash\n\
+relay plan --task \"<task>\" --context \"<context>\"\n\
+```\n\
+Output: JSON list of subtasks with `agent`, `task`, `reason` per entry.\n\
+\n\
+**2. Show plan to user, ask approval.**\n\
+Present clearly. Wait for confirmation before proceeding.\n\
+\n\
+**3. Execute (parallel)** — after approval, spawn all agents in a single response\n\
+using multiple Bash tool calls simultaneously:\n\
+```bash\n\
+relay run <agent1> --task \"<task1>\" --context \"<context>\"\n\
+relay run <agent2> --task \"<task2>\" --context \"<context>\"\n\
+```\n\
+Each call blocks until agent finishes. Parallel = faster wall time.\n\
+\n\
+**4. Review** — after all agents finish:\n\
+- Summarize each agent output (built-in — no separate LLM call)\n\
+- Read modified files\n\
+- Verify correctness against original task\n\
+\n\
+**5. Fix or close**\n\
+- Incorrect/incomplete → fix yourself or spawn targeted agent\n\
+- All correct → report to user, close session\n\
+\n\
+### Commands\n\
 \n\
 ```bash\n\
-relay run <agent> --task \"<task>\" --context \"<context>\"  # run agent\n\
-relay plan <agent> --task \"<task>\"                        # dry-run preview (JSON)\n\
-relay agent list                                          # list registered agents\n\
-relay agent check                                         # check PATH availability\n\
-relay config show                                         # show relay.config.yaml\n\
+relay plan --task \"<task>\" --context \"<context>\"         # generate task plan (JSON)\n\
+relay run <agent> --task \"<task>\" --context \"<context>\"  # run agent (blocking)\n\
+relay agent list                                           # list registered agents\n\
+relay agent check                                          # check PATH availability\n\
+relay config show                                          # show relay.config.yaml\n\
 ```\n\
 \n\
-Context format:\n\
+### Context format\n\
+\n\
 ```\n\
 Goal: <overall goal>\n\
 Done: <what's already done>\n\
@@ -110,8 +208,9 @@ Modified: <files already changed>\n\
 Avoid: <things that failed, don't retry>\n\
 ```\n\
 \n\
-Run `relay init` in the project root to create relay.config.yaml.\n\
+Run `relay init` in project root to create relay.config.yaml.\n\
 Run `/relay-init` in Claude Code to set up interactively.\n\
+Run `/relay-plan` in Claude Code to orchestrate a task end-to-end.\n\
 {}\n",
         CLAUDE_CODE_MARKER_START, CLAUDE_CODE_MARKER_END
     )
@@ -131,19 +230,26 @@ fn replace_between_markers(content: &str, new_block: &str) -> String {
 }
 
 fn install_relay_init_skill(global: bool) -> Result<()> {
-    let skill_dir = if global {
+    let skills_root = if global {
         let home = std::env::var("HOME")
             .map_err(|_| anyhow::anyhow!("$HOME not set"))?;
-        PathBuf::from(home).join(".claude").join("skills").join("relay-init")
+        PathBuf::from(home).join(".claude").join("skills")
     } else {
-        let cwd = std::env::current_dir()?;
-        cwd.join(".claude").join("skills").join("relay-init")
+        std::env::current_dir()?.join(".claude").join("skills")
     };
 
-    fs::create_dir_all(&skill_dir)?;
-    let skill_path = skill_dir.join("SKILL.md");
-    fs::write(&skill_path, SKILL_CONTENT)?;
-    println!("  ✓ Installed /relay-init skill → {}", skill_path.display());
+    let skills = [
+        ("relay-init", SKILL_RELAY_INIT),
+        ("relay-plan", SKILL_RELAY_PLAN),
+    ];
+
+    for (name, content) in &skills {
+        let dir = skills_root.join(name);
+        fs::create_dir_all(&dir)?;
+        let path = dir.join("SKILL.md");
+        fs::write(&path, content)?;
+        println!("  ✓ Installed /{} skill → {}", name, path.display());
+    }
 
     Ok(())
 }

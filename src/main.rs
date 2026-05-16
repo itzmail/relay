@@ -19,15 +19,6 @@ enum Commands {
     /// Initialize relay.config.yaml interactively
     Init,
 
-    /// Show execution plan and ask for confirmation before running
-    Plan {
-        agent: String,
-        #[arg(long)]
-        task: String,
-        #[arg(long, default_value = "")]
-        context: String,
-    },
-
     /// Run an agent with a task and context (non-interactive)
     Run {
         agent: String,
@@ -83,9 +74,6 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Init => {
             runner::init().await?;
-        }
-        Commands::Plan { agent, task, context } => {
-            runner::plan(&agent, &task, &context).await?;
         }
         Commands::Run { agent, task, context, model } => {
             let output = runner::run(&agent, &task, &context, model.as_deref()).await?;
