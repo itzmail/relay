@@ -46,7 +46,18 @@ URL="https://github.com/${REPO}/releases/download/${LATEST}/${ASSET}"
 curl -fsSL "$URL" -o "$TMP/$ASSET"
 tar xzf "$TMP/$ASSET" -C "$TMP"
 
-install -m 755 "$TMP/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+if install -m 755 "$TMP/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME" 2>/dev/null; then
+  :
+elif command -v sudo >/dev/null 2>&1; then
+  echo "Permission denied. Retrying with sudo..."
+  sudo install -m 755 "$TMP/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+else
+  # Fallback: install to ~/.local/bin
+  INSTALL_DIR="$HOME/.local/bin"
+  mkdir -p "$INSTALL_DIR"
+  install -m 755 "$TMP/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
+  echo "Installed to $INSTALL_DIR (no sudo available). Ensure it is in your PATH."
+fi
 
 echo "relay ${LATEST} installed to ${INSTALL_DIR}/${BIN_NAME}"
 echo "Run 'relay setup claude-code --global' to get started."
