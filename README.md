@@ -81,6 +81,28 @@ cargo install --git https://github.com/itzmail/relay
 
 ---
 
+## Uninstall
+
+### macOS / Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/itzmail/relay/master/uninstall.sh | sh
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/itzmail/relay/master/uninstall.ps1 | iex
+```
+
+### Installed via cargo
+
+```bash
+cargo uninstall relay
+```
+
+---
+
 ## Quick Start
 
 ### 1. Set up Relay for Claude Code
