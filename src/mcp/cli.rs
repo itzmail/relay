@@ -24,6 +24,15 @@ pub enum McpCommands {
     Stop,
     /// Show daemon status
     Status,
+    /// Remove Relay MCP config from AI coding agent config files
+    Uninstall {
+        /// Print changes without writing to disk
+        #[arg(long)]
+        dry_run: bool,
+        /// Target specific agents: claude,codex,copilot
+        #[arg(long, value_delimiter = ',')]
+        target: Vec<String>,
+    },
     /// Write MCP client config for AI coding agents to disk
     Install {
         /// Skip prompts; install all detected agents with defaults
@@ -43,6 +52,7 @@ pub async fn dispatch(cmd: McpCommands) -> Result<()> {
         McpCommands::Start { port, foreground } => start(port, foreground).await,
         McpCommands::Stop => stop().await,
         McpCommands::Status => show_status(),
+        McpCommands::Uninstall { dry_run, target } => uninstall(dry_run, target),
         McpCommands::Install { yes, dry_run, target } => install(yes, dry_run, target),
     }
 }
@@ -219,6 +229,77 @@ fn install(yes: bool, dry_run: bool, targets: Vec<String>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn uninstall(dry_run: bool, targets: Vec<String>) -> Result<()> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot resolve home dir"))?;
+
+    let agents: Vec<&'static str> = if !targets.is_empty() {
+        targets
+            .iter()
+            .filter_map(|t| match t.as_str() {
+                "claude" => Some("claude"),
+                "codex" => Some("codex"),
+                "copilot" => Some("copilot"),
+                other => { eprintln!("Unknown target '{other}'. Valid: claude, codex, copilot"); None }
+            })
+            .collect()
+    } else {
+        vec!["claude", "codex", "copilot"]
+    };
+
+    for agent in agents {
+        match agent {
+            "claude" => {
+                let project_path = std::env::current_dir()?.join(".mcp.json");
+                let global_path = home.join(".claude.json");
+
+                if project_path.exists() {
+                    run_uninstall("Claude Code (project)", &project_path, dry_run, installer::uninstall_claude);
+                } else {
+                    eprintln!("Warning: no .mcp.json in current directory.");
+                    if global_path.exists() {
+                        print!("Remove relay from global ~/.claude.json? [y/N]: ");
+                        io::stdout().flush()?;
+                        let mut input = String::new();
+                        io::stdin().read_line(&mut input)?;
+                        if input.trim().eq_ignore_ascii_case("y") {
+                            run_uninstall("Claude Code (global)", &global_path, dry_run, installer::uninstall_claude);
+                        } else {
+                            println!("  - Claude Code (global): skipped.");
+                        }
+                    } else {
+                        println!("  - Claude Code: no config found, skip.");
+                    }
+                }
+            }
+            "codex" => {
+                let path = home.join(".codex").join("config.toml");
+                run_uninstall("Codex", &path, dry_run, installer::uninstall_codex);
+            }
+            "copilot" => {
+                let path = home.join(".copilot").join("mcp-config.json");
+                run_uninstall("Copilot", &path, dry_run, installer::uninstall_copilot);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn run_uninstall(
+    label: &str,
+    path: &std::path::Path,
+    dry_run: bool,
+    f: impl Fn(&std::path::Path, bool) -> Result<bool>,
+) {
+    match f(path, dry_run) {
+        Ok(true) if dry_run => println!("  ~ {label} (dry-run): would remove relay from {}", path.display()),
+        Ok(true) => println!("  ✓ {label}: removed relay from {}", path.display()),
+        Ok(false) => println!("  - {label}: relay key not found, skip."),
+        Err(e) => eprintln!("  ✗ {label}: {e}"),
+    }
 }
 
 fn prompt_targets(detected: &[&'static str]) -> Result<Vec<&'static str>> {

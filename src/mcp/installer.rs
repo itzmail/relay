@@ -85,6 +85,61 @@ pub fn install_copilot(url: &str, path: &Path, dry_run: bool) -> Result<String> 
     Ok(pretty)
 }
 
+pub fn uninstall_claude(path: &Path, dry_run: bool) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut root: Value = serde_json::from_str(&fs::read_to_string(path)?)
+        .context("invalid JSON in existing .mcp.json")?;
+    let removed = root
+        .as_object_mut()
+        .and_then(|obj| obj.get_mut("mcpServers"))
+        .and_then(|s| s.as_object_mut())
+        .map(|servers| servers.remove("relay").is_some())
+        .unwrap_or(false);
+    if removed && !dry_run {
+        write_atomic(path, &serde_json::to_string_pretty(&root)?)?;
+    }
+    Ok(removed)
+}
+
+pub fn uninstall_codex(path: &Path, dry_run: bool) -> Result<bool> {
+    use toml_edit::DocumentMut;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut doc: DocumentMut = fs::read_to_string(path)?
+        .parse()
+        .context("invalid TOML in ~/.codex/config.toml")?;
+    let removed = doc
+        .get_mut("mcp_servers")
+        .and_then(|t| t.as_table_mut())
+        .map(|t| t.remove("relay").is_some())
+        .unwrap_or(false);
+    if removed && !dry_run {
+        write_atomic(path, &doc.to_string())?;
+    }
+    Ok(removed)
+}
+
+pub fn uninstall_copilot(path: &Path, dry_run: bool) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut root: Value = serde_json::from_str(&fs::read_to_string(path)?)
+        .context("invalid JSON in ~/.copilot/mcp-config.json")?;
+    let removed = root
+        .as_object_mut()
+        .and_then(|obj| obj.get_mut("mcpServers"))
+        .and_then(|s| s.as_object_mut())
+        .map(|servers| servers.remove("relay").is_some())
+        .unwrap_or(false);
+    if removed && !dry_run {
+        write_atomic(path, &serde_json::to_string_pretty(&root)?)?;
+    }
+    Ok(removed)
+}
+
 fn write_atomic(path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
