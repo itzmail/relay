@@ -2,12 +2,13 @@ use anyhow::{Result, bail};
 use clap::Subcommand;
 use rusqlite::Connection;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::RelayConfig;
-use super::{daemon, db, paths, server, spawn, status};
+use super::{daemon, db, installer, paths, server, spawn, status};
 
 #[derive(Subcommand)]
 pub enum McpCommands {
@@ -23,8 +24,18 @@ pub enum McpCommands {
     Stop,
     /// Show daemon status
     Status,
-    /// Generate MCP client config for AI coding agents
-    Install,
+    /// Write MCP client config for AI coding agents to disk
+    Install {
+        /// Skip prompts; install all detected agents with defaults
+        #[arg(long)]
+        yes: bool,
+        /// Print changes without writing to disk
+        #[arg(long)]
+        dry_run: bool,
+        /// Target specific agents: claude,codex,copilot
+        #[arg(long, value_delimiter = ',')]
+        target: Vec<String>,
+    },
 }
 
 pub async fn dispatch(cmd: McpCommands) -> Result<()> {
@@ -32,7 +43,7 @@ pub async fn dispatch(cmd: McpCommands) -> Result<()> {
         McpCommands::Start { port, foreground } => start(port, foreground).await,
         McpCommands::Stop => stop().await,
         McpCommands::Status => show_status(),
-        McpCommands::Install => install(),
+        McpCommands::Install { yes, dry_run, target } => install(yes, dry_run, target),
     }
 }
 
@@ -138,45 +149,115 @@ fn show_status() -> Result<()> {
     Ok(())
 }
 
-fn install() -> Result<()> {
+fn install(yes: bool, dry_run: bool, targets: Vec<String>) -> Result<()> {
     let p = paths();
     let port = fs::read_to_string(&p.port)
         .ok()
         .and_then(|s| s.trim().parse::<u16>().ok())
         .unwrap_or(7777);
-
     let url = format!("http://localhost:{port}/mcp");
 
-    println!("Relay MCP server URL: {url}");
-    println!();
-    println!("# Claude Code / Pi (.mcp.json):");
+    if !p.port.exists() {
+        eprintln!("Warning: daemon has not been started yet. Using default port 7777.");
+        eprintln!("Run `relay mcp start` first, then `relay mcp install`.");
+    }
+
+    let detected = installer::detect_installed();
+    println!("Relay MCP URL: {url}");
     println!(
-        r#"{{
-  "mcpServers": {{
-    "relay": {{
-      "url": "{url}"
-    }}
-  }}
-}}"#
+        "Detected in PATH: {}",
+        if detected.is_empty() { "none".to_string() } else { detected.join(", ") }
     );
     println!();
-    println!("# Codex (~/.codex/config.toml):");
-    println!("[mcp_servers.relay]\nurl = \"{url}\"");
-    println!();
-    println!("# Copilot CLI (~/.copilot/mcp-config.json):");
-    println!(
-        r#"{{
-  "mcpServers": {{
-    "relay": {{
-      "type": "http",
-      "url": "{url}",
-      "tools": ["*"]
-    }}
-  }}
-}}"#
-    );
+
+    let chosen: Vec<&'static str> = if !targets.is_empty() {
+        targets
+            .iter()
+            .filter_map(|t| match t.as_str() {
+                "claude" => Some("claude"),
+                "codex" => Some("codex"),
+                "copilot" => Some("copilot"),
+                other => { eprintln!("Unknown target '{other}'. Valid: claude, codex, copilot"); None }
+            })
+            .collect()
+    } else if yes {
+        detected.clone()
+    } else {
+        prompt_targets(&detected)?
+    };
+
+    if chosen.is_empty() {
+        println!("Nothing to install.");
+        return Ok(());
+    }
+
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot resolve home dir"))?;
+
+    for agent in chosen {
+        let (config_path, label) = match agent {
+            "claude" => resolve_claude_path(yes || !targets.is_empty(), &home)?,
+            "codex" => (home.join(".codex").join("config.toml"), "Codex".to_string()),
+            "copilot" => (home.join(".copilot").join("mcp-config.json"), "Copilot".to_string()),
+            _ => continue,
+        };
+
+        let result = match agent {
+            "claude" => installer::install_claude(&url, &config_path, dry_run),
+            "codex" => installer::install_codex(&url, &config_path, dry_run),
+            "copilot" => installer::install_copilot(&url, &config_path, dry_run),
+            _ => unreachable!(),
+        };
+
+        match result {
+            Ok(content) if dry_run => {
+                println!("--- {label} (dry-run): {} ---", config_path.display());
+                println!("{content}");
+            }
+            Ok(_) => println!("  ✓ {label}: wrote {}", config_path.display()),
+            Err(e) => eprintln!("  ✗ {label}: {e}"),
+        }
+    }
 
     Ok(())
+}
+
+fn prompt_targets(detected: &[&'static str]) -> Result<Vec<&'static str>> {
+    let stdin = io::stdin();
+    let mut chosen = Vec::new();
+
+    for &agent in &["claude", "codex", "copilot"] {
+        let installed = detected.contains(&agent);
+        let default_hint = if installed { "Y/n" } else { "y/N" };
+        print!("Install for {agent}? [{default_hint}] ");
+        io::stdout().flush()?;
+        let mut line = String::new();
+        stdin.lock().read_line(&mut line)?;
+        let trimmed = line.trim();
+        let pick = if trimmed.is_empty() { installed } else { trimmed.eq_ignore_ascii_case("y") };
+        if pick {
+            chosen.push(agent);
+        }
+    }
+    Ok(chosen)
+}
+
+fn resolve_claude_path(yes: bool, home: &Path) -> Result<(PathBuf, String)> {
+    if yes {
+        let path = std::env::current_dir()?.join(".mcp.json");
+        return Ok((path, "Claude Code (project)".to_string()));
+    }
+    println!("Claude Code config scope:");
+    println!("  [1] Project (./.mcp.json)  <- recommended");
+    println!("  [2] Global  (~/.claude.json)");
+    print!("Select [1]: ");
+    io::stdout().flush()?;
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line)?;
+    match line.trim() {
+        "" | "1" => Ok((std::env::current_dir()?.join(".mcp.json"), "Claude Code (project)".to_string())),
+        "2" => Ok((home.join(".claude.json"), "Claude Code (global)".to_string())),
+        _ => bail!("Invalid selection"),
+    }
 }
 
 fn setup_tracing_stderr() {

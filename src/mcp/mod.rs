@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod daemon;
 pub mod db;
+pub mod installer;
 pub mod jobs;
 pub mod server;
 pub mod spawn;
