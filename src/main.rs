@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 mod adapters;
 mod config;
 mod context;
+mod mcp;
 mod runner;
 mod setup;
 
@@ -54,6 +55,12 @@ enum Commands {
         #[arg(long)]
         list: bool,
     },
+
+    /// MCP server daemon commands
+    Mcp {
+        #[command(subcommand)]
+        cmd: mcp::cli::McpCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -94,6 +101,9 @@ async fn main() -> Result<()> {
             } else {
                 setup::list_targets();
             }
+        }
+        Commands::Mcp { cmd } => {
+            mcp::cli::dispatch(cmd).await?;
         }
     }
 
