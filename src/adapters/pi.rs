@@ -20,11 +20,15 @@ impl PiAdapter {
 }
 
 impl Agent for PiAdapter {
-    fn run(&self, task: &str, context: &str) -> Result<RawOutput> {
+    fn spawn_args(&self, task: &str, context: &str) -> (String, Vec<String>) {
         let prompt = build_prompt(context, task);
+        (self.command.clone(), vec!["-p".into(), prompt, "--model".into(), self.model.clone()])
+    }
 
-        let output = Command::new(&self.command)
-            .args(["-p", &prompt, "--model", &self.model])
+    fn run(&self, task: &str, context: &str) -> Result<RawOutput> {
+        let (cmd, args) = self.spawn_args(task, context);
+        let output = Command::new(&cmd)
+            .args(&args)
             .output()
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {

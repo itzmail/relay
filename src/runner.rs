@@ -99,7 +99,7 @@ fn which_available(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn git_snapshot() -> Vec<String> {
+pub fn git_snapshot() -> Vec<String> {
     Command::new("git")
         .args(["diff", "--name-only", "HEAD"])
         .output()
@@ -119,7 +119,7 @@ fn git_snapshot() -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn compute_modified(before: Vec<String>, after: Vec<String>) -> Vec<String> {
+pub fn compute_modified(before: Vec<String>, after: Vec<String>) -> Vec<String> {
     after
         .into_iter()
         .filter(|f| !before.contains(f))

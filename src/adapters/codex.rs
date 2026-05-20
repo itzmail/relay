@@ -20,11 +20,15 @@ impl CodexAdapter {
 }
 
 impl Agent for CodexAdapter {
-    fn run(&self, task: &str, context: &str) -> Result<RawOutput> {
+    fn spawn_args(&self, task: &str, context: &str) -> (String, Vec<String>) {
         let prompt = build_prompt(context, task);
+        (self.command.clone(), vec!["exec".into(), "-m".into(), self.model.clone(), "--sandbox".into(), "workspace-write".into(), prompt])
+    }
 
-        let output = Command::new(&self.command)
-            .args(["exec", "-m", &self.model, "--sandbox", "workspace-write", &prompt])
+    fn run(&self, task: &str, context: &str) -> Result<RawOutput> {
+        let (cmd, args) = self.spawn_args(task, context);
+        let output = Command::new(&cmd)
+            .args(&args)
             .output()
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {

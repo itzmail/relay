@@ -68,18 +68,25 @@ pub fn spawn_daemon(port: u16, log_path: &Path) -> Result<u32> {
 
 #[cfg(unix)]
 pub fn stop_daemon(pid: u32) -> Result<()> {
+    if !is_pid_alive(pid) {
+        return Ok(());
+    }
+    kill_pid(pid)
+}
+
+/// SIGTERM → poll 5s → SIGKILL. Shared by daemon stop and spawn module.
+#[cfg(unix)]
+pub fn kill_pid(pid: u32) -> Result<()> {
     use nix::sys::signal::{self, Signal};
     use nix::unistd::Pid as NixPid;
     use std::time::{Duration, Instant};
 
     let nix_pid = NixPid::from_raw(pid as i32);
 
-    // SIGTERM first
     if signal::kill(nix_pid, Signal::SIGTERM).is_err() {
         bail!("Process {pid} not found or permission denied");
     }
 
-    // Poll up to 5s
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         std::thread::sleep(Duration::from_millis(200));
@@ -91,9 +98,13 @@ pub fn stop_daemon(pid: u32) -> Result<()> {
         }
     }
 
-    // SIGKILL escalation
     let _ = signal::kill(nix_pid, Signal::SIGKILL);
     Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn kill_pid(_pid: u32) -> Result<()> {
+    bail!("kill_pid not supported on Windows.");
 }
 
 #[cfg(not(unix))]

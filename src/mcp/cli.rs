@@ -2,10 +2,12 @@ use anyhow::{Result, bail};
 use clap::Subcommand;
 use rusqlite::Connection;
 use std::fs;
+use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
-use super::{daemon, db, paths, server, status};
+use crate::config::RelayConfig;
+use super::{daemon, db, paths, server, spawn, status};
 
 #[derive(Subcommand)]
 pub enum McpCommands {
@@ -28,7 +30,7 @@ pub enum McpCommands {
 pub async fn dispatch(cmd: McpCommands) -> Result<()> {
     match cmd {
         McpCommands::Start { port, foreground } => start(port, foreground).await,
-        McpCommands::Stop => stop(),
+        McpCommands::Stop => stop().await,
         McpCommands::Status => show_status(),
         McpCommands::Install => install(),
     }
@@ -45,6 +47,16 @@ async fn start(port: u16, foreground: bool) -> Result<()> {
         let conn = db::open_or_init(&p.db)?;
         let db_handle: Arc<Mutex<Connection>> = Arc::new(Mutex::new(conn));
 
+        // Load config (optional — daemon continues with defaults if no relay.config.yaml)
+        let config = RelayConfig::load().unwrap_or_else(|_| RelayConfig {
+            agents: Default::default(),
+            max_concurrent_jobs: 4,
+        });
+
+        let registry = Arc::new(spawn::JobRegistry::new());
+        let paths_arc = Arc::new(p);
+        let config_arc = Arc::new(config);
+
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
         tokio::spawn(async move {
@@ -52,7 +64,8 @@ async fn start(port: u16, foreground: bool) -> Result<()> {
             cancel_clone.cancel();
         });
 
-        server::run_server(port, cancel, db_handle).await?;
+        server::run_server(port, cancel, db_handle, registry, config_arc, paths_arc).await?;
+        let p = paths(); // re-derive after move
         daemon::cleanup(&p.pid, &p.port);
         return Ok(());
     }
@@ -66,6 +79,7 @@ async fn start(port: u16, foreground: bool) -> Result<()> {
     }
 
     fs::create_dir_all(&p.dir)?;
+    fs::create_dir_all(&p.jobs_dir)?;
     db::open_or_init(&p.db)?;
 
     let child_pid = daemon::spawn_daemon(port, &p.log)?;
@@ -77,7 +91,7 @@ async fn start(port: u16, foreground: bool) -> Result<()> {
     Ok(())
 }
 
-fn stop() -> Result<()> {
+async fn stop() -> Result<()> {
     let p = paths();
 
     let pid = daemon::read_pid(&p.pid)
@@ -87,6 +101,26 @@ fn stop() -> Result<()> {
         println!("Process {pid} not alive. Cleaning up stale files.");
         daemon::cleanup(&p.pid, &p.port);
         return Ok(());
+    }
+
+    // Check for active jobs
+    if let Ok(conn) = db::open_or_init(&p.db) {
+        if let Ok(active) = super::jobs::list_active(&conn) {
+            if !active.is_empty() {
+                println!("{} job(s) still running:", active.len());
+                for (id, agent) in &active {
+                    println!("  - {} (job {})", agent, id);
+                }
+                print!("Kill all & checkpoint? [y/N]: ");
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    bail!("Stop aborted. Daemon still running.");
+                }
+                // Daemon itself will handle checkpoint kill via shutdown hook
+            }
+        }
     }
 
     print!("Stopping relay MCP daemon (PID {pid})...");

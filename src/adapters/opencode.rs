@@ -20,11 +20,15 @@ impl OpenCodeAdapter {
 }
 
 impl Agent for OpenCodeAdapter {
-    fn run(&self, task: &str, context: &str) -> Result<RawOutput> {
+    fn spawn_args(&self, task: &str, context: &str) -> (String, Vec<String>) {
         let prompt = build_prompt(context, task);
+        (self.command.clone(), vec!["run".into(), "-m".into(), self.model.clone(), prompt])
+    }
 
-        let output = Command::new(&self.command)
-            .args(["run", "-m", &self.model, &prompt])
+    fn run(&self, task: &str, context: &str) -> Result<RawOutput> {
+        let (cmd, args) = self.spawn_args(task, context);
+        let output = Command::new(&cmd)
+            .args(&args)
             .output()
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {

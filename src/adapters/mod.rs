@@ -99,7 +99,7 @@ pub async fn init_interactive() -> Result<()> {
         }
     }
 
-    let config = crate::config::RelayConfig { agents };
+    let config = crate::config::RelayConfig { agents, max_concurrent_jobs: 4 };
     config.save()?;
     println!("\nrelay.config.yaml created.");
     Ok(())

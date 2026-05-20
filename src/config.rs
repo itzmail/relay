@@ -12,9 +12,13 @@ pub struct AgentConfig {
     pub default_model: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+fn default_max_concurrent_jobs() -> usize { 4 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RelayConfig {
     pub agents: HashMap<String, AgentConfig>,
+    #[serde(default = "default_max_concurrent_jobs")]
+    pub max_concurrent_jobs: usize,
 }
 
 impl RelayConfig {

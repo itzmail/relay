@@ -12,6 +12,11 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+use crate::config::RelayConfig;
+use super::jobs;
+use super::spawn::JobRegistry;
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -53,13 +58,9 @@ pub struct PingResponse {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SendArgs {
-    /// Identifier of the sending agent (non-empty, max 128 chars)
     pub from: String,
-    /// Target agent id. Omit for broadcast.
     pub to: Option<String>,
-    /// Optional topic tag (e.g. "task", "alerts")
     pub topic: Option<String>,
-    /// Message body (plain text or JSON string)
     pub payload: String,
 }
 
@@ -73,11 +74,8 @@ pub struct SendResponse {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReadArgs {
-    /// Agent reading messages — only receives its DMs + broadcasts
     pub agent_id: String,
-    /// Filter by topic. Omit for all topics.
     pub topic: Option<String>,
-    /// Max messages to return (default 50, max 200)
     pub limit: Option<u32>,
 }
 
@@ -114,6 +112,91 @@ pub struct AgentsResponse {
     pub agents: Vec<AgentInfo>,
 }
 
+// ─── Spawn ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SpawnArgs {
+    /// Agent name: "opencode" | "codex" | "copilot" | "pi"
+    pub agent: String,
+    /// Task description for the agent
+    pub task: String,
+    /// Optional context string (goal/done/why/avoid)
+    pub context: Option<String>,
+    /// Override the default model for this agent
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct SpawnResponse {
+    pub job_id: String,
+    pub pid: u32,
+    pub log_path: String,
+    pub status: String,
+}
+
+// ─── Job Status ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct JobStatusArgs {
+    pub job_id: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct LogLine {
+    pub line_no: i64,
+    pub stream: String,
+    pub content: String,
+    pub ts: u64,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct JobStatusResponse {
+    pub job_id: String,
+    pub agent: String,
+    pub status: String,
+    pub pid: Option<u32>,
+    pub started_at: u64,
+    pub finished_at: Option<u64>,
+    pub last_stdout_at: u64,
+    pub exit_code: Option<i32>,
+    pub modified_files: Option<Vec<String>>,
+    pub tail: Vec<LogLine>,
+}
+
+// ─── Job Logs ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct JobLogsArgs {
+    pub job_id: String,
+    /// Byte offset to start reading from (default 0)
+    pub offset: Option<u64>,
+    /// Max bytes to return (default 65536, max 1048576)
+    pub max_bytes: Option<u64>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct JobLogsResponse {
+    pub content: String,
+    pub next_offset: u64,
+    pub eof: bool,
+}
+
+// ─── Job Kill ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct JobKillArgs {
+    pub job_id: String,
+    /// Send checkpoint prompt to agent via stdin before killing (default true)
+    pub checkpoint: Option<bool>,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+pub struct JobKillResponse {
+    pub job_id: String,
+    pub status: String,
+    pub checkpoint_response: Option<String>,
+}
+
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -121,13 +204,24 @@ pub struct RelayService {
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
     db: Arc<Mutex<Connection>>,
+    registry: Arc<JobRegistry>,
+    config: Arc<RelayConfig>,
+    paths: Arc<super::RelayPaths>,
 }
 
 impl RelayService {
-    pub fn new(db: Arc<Mutex<Connection>>) -> Self {
+    pub fn new(
+        db: Arc<Mutex<Connection>>,
+        registry: Arc<JobRegistry>,
+        config: Arc<RelayConfig>,
+        paths: Arc<super::RelayPaths>,
+    ) -> Self {
         Self {
             tool_router: Self::tool_router(),
             db,
+            registry,
+            config,
+            paths,
         }
     }
 }
@@ -308,6 +402,148 @@ impl RelayService {
             .collect();
 
         let resp = AgentsResponse { agents };
+        Ok(serde_json::to_string(&resp).unwrap())
+    }
+
+    #[tool(description = "Spawn an AI coding agent (opencode/codex/copilot/pi) as a background job. Returns job_id for tracking.")]
+    fn relay_spawn(
+        &self,
+        Parameters(args): Parameters<SpawnArgs>,
+    ) -> Result<String, ErrorData> {
+        let registry = self.registry.clone();
+        let db = self.db.clone();
+        let config = self.config.clone();
+        let paths = self.paths.clone();
+        let context = args.context.unwrap_or_default();
+        let model = args.model.clone();
+
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                registry.spawn(
+                    &args.agent,
+                    &args.task,
+                    &context,
+                    model.as_deref(),
+                    &config,
+                    db,
+                    &paths,
+                ).await
+            })
+        })?;
+
+        let resp = SpawnResponse {
+            job_id: result.job_id,
+            pid: result.pid,
+            log_path: result.log_path,
+            status: "working".to_string(),
+        };
+        Ok(serde_json::to_string(&resp).unwrap())
+    }
+
+    #[tool(description = "Get status and last 50 lines of output for a spawned job.")]
+    fn relay_job_status(
+        &self,
+        Parameters(args): Parameters<JobStatusArgs>,
+    ) -> Result<String, ErrorData> {
+        let conn = self.db.lock().map_err(|_| {
+            ErrorData::internal_error("db lock poisoned", None)
+        })?;
+
+        let job = jobs::get_job(&conn, &args.job_id)
+            .map_err(|e| ErrorData::internal_error(format!("db error: {e}"), None))?
+            .ok_or_else(|| ErrorData::invalid_params(format!("job '{}' not found", args.job_id), None))?;
+
+        let tail_lines = jobs::get_tail(&conn, &args.job_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|l| LogLine {
+                line_no: l.line_no,
+                stream: l.stream,
+                content: l.content,
+                ts: l.ts,
+            })
+            .collect();
+
+        let modified_files: Option<Vec<String>> = job
+            .modified_files
+            .and_then(|s| serde_json::from_str(&s).ok());
+
+        let resp = JobStatusResponse {
+            job_id: job.id,
+            agent: job.agent,
+            status: job.status,
+            pid: job.pid,
+            started_at: job.started_at,
+            finished_at: job.finished_at,
+            last_stdout_at: job.last_stdout_at,
+            exit_code: job.exit_code,
+            modified_files,
+            tail: tail_lines,
+        };
+        Ok(serde_json::to_string(&resp).unwrap())
+    }
+
+    #[tool(description = "Read raw log output for a job from byte offset. Use next_offset for pagination.")]
+    fn relay_job_logs(
+        &self,
+        Parameters(args): Parameters<JobLogsArgs>,
+    ) -> Result<String, ErrorData> {
+        let conn = self.db.lock().map_err(|_| {
+            ErrorData::internal_error("db lock poisoned", None)
+        })?;
+
+        let job = jobs::get_job(&conn, &args.job_id)
+            .map_err(|e| ErrorData::internal_error(format!("db error: {e}"), None))?
+            .ok_or_else(|| ErrorData::invalid_params(format!("job '{}' not found", args.job_id), None))?;
+
+        drop(conn); // release lock before file IO
+
+        let offset = args.offset.unwrap_or(0);
+        let max_bytes = args.max_bytes.unwrap_or(65536).min(1048576);
+
+        let file_result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                let mut file = tokio::fs::File::open(&job.log_path).await?;
+                file.seek(std::io::SeekFrom::Start(offset)).await?;
+                let mut buf = vec![0u8; max_bytes as usize];
+                let n = file.read(&mut buf).await?;
+                buf.truncate(n);
+                Ok::<(Vec<u8>, bool), std::io::Error>((buf, n == 0 && job.finished_at.is_some()))
+            })
+        });
+
+        let (bytes, eof) = file_result.map_err(|e: std::io::Error| {
+            ErrorData::internal_error(format!("log read error: {e}"), None)
+        })?;
+
+        let content = String::from_utf8_lossy(&bytes).to_string();
+        let next_offset = offset + bytes.len() as u64;
+
+        let resp = JobLogsResponse { content, next_offset, eof };
+        Ok(serde_json::to_string(&resp).unwrap())
+    }
+
+    #[tool(description = "Kill a running job. Optionally send checkpoint prompt via stdin first (default: true).")]
+    fn relay_job_kill(
+        &self,
+        Parameters(args): Parameters<JobKillArgs>,
+    ) -> Result<String, ErrorData> {
+        let registry = self.registry.clone();
+        let db = self.db.clone();
+        let checkpoint = args.checkpoint.unwrap_or(true);
+        let job_id = args.job_id.clone();
+
+        let checkpoint_response = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                registry.kill(&job_id, checkpoint, db).await
+            })
+        })?;
+
+        let resp = JobKillResponse {
+            job_id: args.job_id,
+            status: "killed".to_string(),
+            checkpoint_response,
+        };
         Ok(serde_json::to_string(&resp).unwrap())
     }
 }

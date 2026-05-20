@@ -57,6 +57,49 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    let version: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |r| r.get(0),
+    )?;
+
+    if version < 3 {
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                agent TEXT NOT NULL,
+                task TEXT NOT NULL,
+                pid INTEGER,
+                status TEXT NOT NULL,
+                log_path TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                finished_at INTEGER,
+                exit_code INTEGER,
+                last_stdout_at INTEGER NOT NULL,
+                modified_files TEXT,
+                checkpoint TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+            CREATE INDEX IF NOT EXISTS idx_jobs_started_at ON jobs(started_at);
+
+            CREATE TABLE IF NOT EXISTS job_logs_tail (
+                job_id TEXT NOT NULL,
+                line_no INTEGER NOT NULL,
+                stream TEXT NOT NULL,
+                content TEXT NOT NULL,
+                ts INTEGER NOT NULL,
+                PRIMARY KEY (job_id, line_no)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_job_logs_tail_job ON job_logs_tail(job_id, line_no);
+
+            INSERT OR IGNORE INTO schema_version(version) VALUES (3);
+            ",
+        )?;
+    }
+
     Ok(())
 }
 
@@ -72,7 +115,7 @@ mod tests {
         let version: i64 = conn
             .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
 
         // Idempotent — run again, should not error
         run_migrations(&conn).unwrap();
@@ -80,6 +123,6 @@ mod tests {
         let version2: i64 = conn
             .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version2, 2);
+        assert_eq!(version2, 3);
     }
 }
