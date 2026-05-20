@@ -1,6 +1,8 @@
 use anyhow::{Result, bail};
 use clap::Subcommand;
+use rusqlite::Connection;
 use std::fs;
+use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use super::{daemon, db, paths, server, status};
@@ -40,6 +42,9 @@ async fn start(port: u16, foreground: bool) -> Result<()> {
         setup_tracing_stderr();
         tracing::info!("Starting Relay MCP server on port {port} (foreground)");
 
+        let conn = db::open_or_init(&p.db)?;
+        let db_handle: Arc<Mutex<Connection>> = Arc::new(Mutex::new(conn));
+
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
         tokio::spawn(async move {
@@ -47,7 +52,7 @@ async fn start(port: u16, foreground: bool) -> Result<()> {
             cancel_clone.cancel();
         });
 
-        server::run_server(port, cancel).await?;
+        server::run_server(port, cancel, db_handle).await?;
         daemon::cleanup(&p.pid, &p.port);
         return Ok(());
     }

@@ -37,6 +37,26 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         INSERT OR IGNORE INTO schema_version(version) VALUES (1);
         ",
     )?;
+
+    let version: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |r| r.get(0),
+    )?;
+
+    if version < 2 {
+        conn.execute_batch(
+            "
+            ALTER TABLE agents ADD COLUMN last_read_id INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE agents ADD COLUMN last_seen INTEGER NOT NULL DEFAULT 0;
+
+            CREATE INDEX IF NOT EXISTS idx_messages_to_agent ON messages(to_agent);
+
+            INSERT OR IGNORE INTO schema_version(version) VALUES (2);
+            ",
+        )?;
+    }
+
     Ok(())
 }
 
@@ -50,8 +70,16 @@ mod tests {
         run_migrations(&conn).unwrap();
 
         let version: i64 = conn
-            .query_row("SELECT version FROM schema_version", [], |r| r.get(0))
+            .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
+
+        // Idempotent — run again, should not error
+        run_migrations(&conn).unwrap();
+
+        let version2: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version2, 2);
     }
 }

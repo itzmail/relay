@@ -3,14 +3,16 @@ use axum::Router;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpService, StreamableHttpServerConfig, session::local::LocalSessionManager,
 };
+use rusqlite::Connection;
+use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use super::tools::RelayService;
 
-pub async fn run_server(port: u16, cancel: CancellationToken) -> Result<()> {
+pub async fn run_server(port: u16, cancel: CancellationToken, db: Arc<Mutex<Connection>>) -> Result<()> {
     let service: StreamableHttpService<RelayService, LocalSessionManager> =
         StreamableHttpService::new(
-            || Ok(RelayService::new()),
+            move || Ok(RelayService::new(db.clone())),
             Default::default(),
             StreamableHttpServerConfig::default()
                 .with_cancellation_token(cancel.child_token()),
