@@ -166,6 +166,20 @@ relay agent list                                  # list registered agents
 relay agent check                                 # check binary availability in PATH
 relay config show                                 # print relay.config.yaml
 relay setup claude-code [--global]               # inject into CLAUDE.md + install skills
+
+# MCP daemon
+relay mcp start                                  # start MCP daemon (port 7777)
+relay mcp stop                                   # stop MCP daemon
+relay mcp status                                 # show daemon status
+
+# MCP config installer
+relay mcp install                                # interactive — write MCP config to disk
+relay mcp install --yes                          # non-interactive, install all detected agents
+relay mcp install --target claude,codex,copilot # specific agents only
+relay mcp install --dry-run                      # preview changes, no disk write
+relay mcp uninstall                              # remove relay from all agent configs
+relay mcp uninstall --target claude              # remove from specific agent only
+relay mcp uninstall --dry-run                    # preview removal, no disk write
 ```
 
 ### relay run output
@@ -253,6 +267,55 @@ After `relay setup claude-code`, two slash commands are available:
 |---|---|
 | `/relay-init` | Interactive setup — detect agents, pick models, create config |
 | `/relay-plan` | Full orchestration — plan → approve → parallel execute → review → fix or close |
+
+---
+
+## Relay MCP Server
+
+Relay includes an MCP (Model Context Protocol) daemon that exposes tools directly inside Claude Code and other MCP-compatible agents.
+
+### Start the daemon
+
+```bash
+relay mcp start        # starts on port 7777
+relay mcp status       # check if running
+relay mcp stop         # stop daemon
+```
+
+### Connect your agents
+
+```bash
+relay mcp install      # interactive — detects installed agents, writes config files
+relay mcp install --yes --target claude,codex,copilot   # non-interactive
+```
+
+Writes MCP config to:
+| Agent | Config file |
+|---|---|
+| Claude Code | `.mcp.json` (project) or `~/.claude.json` (global) |
+| Codex | `~/.codex/config.toml` |
+| GitHub Copilot CLI | `~/.copilot/mcp-config.json` |
+
+Merge-safe — existing servers preserved. Idempotent — re-run updates URL.
+
+### Remove config
+
+```bash
+relay mcp uninstall                    # remove from all agents
+relay mcp uninstall --target claude    # remove from specific agent
+```
+
+### MCP Tools available to agents
+
+| Tool | Description |
+|---|---|
+| `relay_send` | Send message to another agent |
+| `relay_read` | Read messages in inbox |
+| `relay_agents` | List active agents |
+| `relay_spawn` | Spawn agent for a task |
+| `relay_job_status` | Check job status |
+| `relay_job_logs` | Stream job logs |
+| `relay_job_kill` | Kill a running job |
 
 ---
 
