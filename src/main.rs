@@ -7,9 +7,10 @@ mod context;
 mod mcp;
 mod runner;
 mod setup;
+mod updater;
 
 #[derive(Parser)]
-#[command(name = "relay", about = "AI agent executor for Claude Code")]
+#[command(name = "relay", about = "AI agent executor for Claude Code", version = env!("CARGO_PKG_VERSION"))]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -61,6 +62,13 @@ enum Commands {
         #[command(subcommand)]
         cmd: mcp::cli::McpCommands,
     },
+
+    /// Update relay to the latest version from GitHub Releases
+    Update {
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -105,7 +113,53 @@ async fn main() -> Result<()> {
         Commands::Mcp { cmd } => {
             mcp::cli::dispatch(cmd).await?;
         }
+        Commands::Update { yes } => {
+            run_update(yes).await?;
+        }
     }
+
+    Ok(())
+}
+
+async fn run_update(yes: bool) -> anyhow::Result<()> {
+    println!("Checking for updates...");
+
+    let info = match updater::force_check_latest_version().await? {
+        Some(i) => i,
+        None => {
+            println!("Already up to date (v{}).", updater::CURRENT_VERSION);
+            return Ok(());
+        }
+    };
+
+    let asset_url = match &info.asset_url {
+        Some(url) => url.clone(),
+        None => {
+            println!(
+                "New version available: v{} → v{}\nRelease: {}\n\nNo pre-built binary found for this platform. Build from source:\n  cargo install --git https://github.com/itzmail/relay",
+                info.current, info.latest, info.release_url
+            );
+            return Ok(());
+        }
+    };
+
+    println!("New version available: v{} → v{}", info.current, info.latest);
+
+    if !yes {
+        print!("Download and install? [y/N] ");
+        use std::io::Write;
+        std::io::stdout().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    println!("Downloading relay v{}...", info.latest);
+    updater::download_and_install(&asset_url).await?;
+    println!("Updated to v{}. Run `relay --version` to verify.", info.latest);
 
     Ok(())
 }

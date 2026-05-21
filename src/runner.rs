@@ -5,6 +5,7 @@ use std::process::Command;
 use crate::adapters::{get_adapter, KNOWN_AGENTS};
 use crate::config::RelayConfig;
 use crate::context::{write_temp_context, delete_temp_context};
+use crate::updater::UpdateInfo;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AgentOutput {
@@ -13,6 +14,8 @@ pub struct AgentOutput {
     pub exit_code: i32,
     pub output: String,
     pub modified_files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_available: Option<UpdateInfo>,
 }
 
 pub async fn run(agent_name: &str, task: &str, context: &str, model_override: Option<&str>) -> Result<AgentOutput> {
@@ -34,11 +37,16 @@ pub async fn run(agent_name: &str, task: &str, context: &str, model_override: Op
 
     let ctx_path = write_temp_context(context)?;
     let before = git_snapshot();
+
+    // Kick off version check concurrently; agent.run() is blocking so run it directly
+    let update_handle = tokio::spawn(crate::updater::check_latest_version());
     let result = adapter.run(task, context);
+
     let after = git_snapshot();
     delete_temp_context(&ctx_path);
     let result = result?;
     let modified_files = compute_modified(before, after);
+    let update_available = update_handle.await.unwrap_or(None);
 
     Ok(AgentOutput {
         agent: agent_name.to_string(),
@@ -50,6 +58,7 @@ pub async fn run(agent_name: &str, task: &str, context: &str, model_override: Op
         exit_code: result.exit_code,
         output: result.output,
         modified_files,
+        update_available,
     })
 }
 
