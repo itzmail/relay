@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "relay": {
+      "url": "http://localhost:7777/mcp"
+    }
+  }
+}

@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
 
@@ -149,71 +150,102 @@ fn claude_md_path(global: bool) -> Result<PathBuf> {
 
 fn relay_instructions_block() -> String {
     format!(
-        "{}\n## Relay (AI Agent Executor)\n\
+        "{}\n## Relay Mesh\n\
 \n\
-Relay delegates coding tasks to specialized AI agents (opencode, codex, copilot, pi).\n\
-You are the **decision maker**. Relay is your executor.\n\
+This session is part of a Relay mesh — a network of AI coding sessions sharing context.\n\
 \n\
-### When to use Relay\n\
+### Clarification Protocol\n\
 \n\
-- Task is clearly scoped and delegatable (implement X, write tests for Y, refactor Z)\n\
-- Task can run independently without your direct involvement\n\
-- Multiple independent subtasks exist that can run in parallel\n\
+When you receive a task via relay and something is ambiguous, call `relay_clarify` \
+before starting work. Do NOT assume or guess — ask first.\n\
 \n\
-### Orchestration Flow\n\
+If the target role cannot answer, the question escalates automatically to the master session.\n\
 \n\
-**1. Plan** — run `/relay-plan` or manually:\n\
-```bash\n\
-relay plan --task \"<task>\" --context \"<context>\"\n\
-```\n\
-Output: JSON list of subtasks with `agent`, `task`, `reason` per entry.\n\
+### Session Commands (MCP tools)\n\
 \n\
-**2. Show plan to user, ask approval.**\n\
-Present clearly. Wait for confirmation before proceeding.\n\
+- `relay_sessions` — list all active sessions in this mesh\n\
+- `relay_send` — send context or a task to another session by role\n\
+- `relay_read` — read incoming messages for this session\n\
+- `relay_clarify` — request clarification from a target role or master\n\
 \n\
-**3. Execute (parallel)** — after approval, spawn all agents in a single response\n\
-using multiple Bash tool calls simultaneously:\n\
-```bash\n\
-relay run <agent1> --task \"<task1>\" --context \"<context>\"\n\
-relay run <agent2> --task \"<task2>\" --context \"<context>\"\n\
-```\n\
-Each call blocks until agent finishes. Parallel = faster wall time.\n\
-\n\
-**4. Review** — after all agents finish:\n\
-- Summarize each agent output (built-in — no separate LLM call)\n\
-- Read modified files\n\
-- Verify correctness against original task\n\
-\n\
-**5. Fix or close**\n\
-- Incorrect/incomplete → fix yourself or spawn targeted agent\n\
-- All correct → report to user, close session\n\
-\n\
-### Commands\n\
-\n\
-```bash\n\
-relay plan --task \"<task>\" --context \"<context>\"         # generate task plan (JSON)\n\
-relay run <agent> --task \"<task>\" --context \"<context>\"  # run agent (blocking)\n\
-relay agent list                                           # list registered agents\n\
-relay agent check                                          # check PATH availability\n\
-relay config show                                          # show relay.config.yaml\n\
-```\n\
-\n\
-### Context format\n\
+### Context format (when sending via relay_send)\n\
 \n\
 ```\n\
 Goal: <overall goal>\n\
-Done: <what's already done>\n\
+Done: <what is already done>\n\
 Why: <key decisions made>\n\
 Modified: <files already changed>\n\
-Avoid: <things that failed, don't retry>\n\
+Avoid: <things that failed, do not retry>\n\
 ```\n\
 \n\
-Run `relay init` in project root to create relay.config.yaml.\n\
-Run `/relay-init` in Claude Code to set up interactively.\n\
-Run `/relay-plan` in Claude Code to orchestrate a task end-to-end.\n\
+Run `relay init` in project root to set up or reconfigure this session.\n\
 {}\n",
         CLAUDE_CODE_MARKER_START, CLAUDE_CODE_MARKER_END
     )
+}
+
+/// Inject SessionStart/Stop/PreToolUse/PostToolUse hooks into .claude/settings.json
+pub fn inject_hooks(global: bool) -> Result<()> {
+    let settings_path = if global {
+        let home = std::env::var("HOME").map_err(|_| anyhow::anyhow!("$HOME not set"))?;
+        PathBuf::from(home).join(".claude").join("settings.json")
+    } else {
+        std::env::current_dir()?.join(".claude").join("settings.json")
+    };
+
+    if let Some(parent) = settings_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut root: Value = if settings_path.exists() {
+        serde_json::from_str(&fs::read_to_string(&settings_path)?)?
+    } else {
+        json!({})
+    };
+
+    let hooks = root.as_object_mut().unwrap();
+    let h = hooks.entry("hooks").or_insert_with(|| json!({}));
+    let h = h.as_object_mut().unwrap();
+
+    // SessionStart: write session file
+    h.entry("SessionStart").or_insert_with(|| json!([]));
+    upsert_hook(&mut h["SessionStart"], "relay session write");
+
+    // SessionEnd: delete session file
+    h.entry("SessionEnd").or_insert_with(|| json!([]));
+    upsert_hook(&mut h["SessionEnd"], "relay session delete");
+
+    // PreToolUse: set status working
+    h.entry("PreToolUse").or_insert_with(|| json!([]));
+    upsert_hook(&mut h["PreToolUse"], "relay session status working");
+
+    // PostToolUse: set status idle
+    h.entry("PostToolUse").or_insert_with(|| json!([]));
+    upsert_hook(&mut h["PostToolUse"], "relay session status idle");
+
+    let pretty = serde_json::to_string_pretty(&root)?;
+    let tmp = settings_path.with_extension("tmp");
+    fs::write(&tmp, &pretty)?;
+    fs::rename(&tmp, &settings_path)?;
+
+    println!("  ✓ Injected hooks → {}", settings_path.display());
+    Ok(())
+}
+
+fn upsert_hook(arr: &mut Value, cmd: &str) {
+    let hooks = arr.as_array_mut().unwrap();
+    let already = hooks.iter().any(|h| {
+        h.get("hooks")
+            .and_then(|hs| hs.as_array())
+            .map(|hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()) == Some(cmd)))
+            .unwrap_or(false)
+    });
+    if !already {
+        hooks.push(json!({
+            "matcher": "",
+            "hooks": [{ "type": "command", "command": cmd }]
+        }));
+    }
 }
 
 fn replace_between_markers(content: &str, new_block: &str) -> String {

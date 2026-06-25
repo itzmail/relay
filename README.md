@@ -1,56 +1,36 @@
 # Relay
 
-**Relay is a CLI tool that lets Claude Code delegate coding tasks to other AI agents** — OpenCode, Codex, GitHub Copilot CLI, and Pi — then returns their raw output back to Claude Code for review.
+**Relay is a mesh coordinator for AI coding sessions.** Open multiple Claude Code (or other AI coding agent) sessions, connect them via Relay, and share context across all of them.
 
-Claude Code is the **decision maker**. Relay is the **executor**.
+Each session has a **role** — master, backend, frontend, reviewer, or any free-text description. Sessions discover each other automatically. Context flows between them via the Relay MCP server.
 
 ---
 
-## Why Relay?
-
-Claude Code is great at reasoning, planning, and reviewing — but sometimes you want to leverage specialized agents for implementation. The problem: there's no native way to orchestrate multiple AI coding agents from within Claude Code.
-
-Relay bridges that gap.
-
-### Before Relay
+## How It Works
 
 ```
-You → Claude Code
-         ↓
-    does everything alone
-    (one model, one context window, sequential)
+You open Claude Code (master)
+        ↓
+   relay init → sets role, injects hooks + MCP config
+        ↓
+   SessionStart hook fires → writes /tmp/relay-sessions/<pid>.json
+        ↓
+You open another Claude Code (backend)
+        ↓
+   relay init → sets role "backend"
+        ↓
+   relay_sessions MCP tool → both sessions are now visible to each other
+        ↓
+   relay_send / relay_read → share context, tasks, clarifications
 ```
 
-### After Relay
-
-```
-You → Claude Code (decision maker)
-              ↓
-     breaks task into subtasks
-     assigns best agent per subtask
-              ↓
-     ┌────────────────────────────┐
-     │  relay run opencode ...    │  ← parallel
-     │  relay run codex    ...    │  ← parallel
-     │  relay run copilot  ...    │  ← parallel
-     └────────────────────────────┘
-              ↓
-     Claude Code reviews all outputs
-     fixes what's wrong, closes session
-```
-
-| | Without Relay | With Relay |
-|---|---|---|
-| Parallelism | Sequential only | Multiple agents in parallel |
-| Agent diversity | One model | Best agent per task type |
-| Wall time | Long | Cuts proportionally with parallelism |
-| Claude Code role | Does everything | Plans, delegates, reviews |
+Sessions auto-register on open, auto-cleanup on close. No manual wiring.
 
 ---
 
 ## Installation
 
-### macOS / Linux (curl)
+### macOS / Linux
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/itzmail/relay/master/install.sh | sh
@@ -62,22 +42,120 @@ curl -fsSL https://raw.githubusercontent.com/itzmail/relay/master/install.sh | s
 irm https://raw.githubusercontent.com/itzmail/relay/master/install.ps1 | iex
 ```
 
-### Manual (from GitHub Releases)
-
-Download the binary for your platform from [Releases](https://github.com/itzmail/relay/releases), then add it to your PATH.
-
-| Platform | File |
-|---|---|
-| macOS Apple Silicon | `relay-macos-aarch64.tar.gz` |
-| macOS Intel | `relay-macos-x86_64.tar.gz` |
-| Linux x86_64 | `relay-linux-x86_64.tar.gz` |
-| Windows x86_64 | `relay-windows-x86_64.zip` |
-
 ### Build from source
 
 ```bash
 cargo install --git https://github.com/itzmail/relay
 ```
+
+---
+
+## Quick Start
+
+### 1. Start the MCP daemon
+
+```bash
+relay mcp start
+```
+
+### 2. Initialize each session
+
+Run this once per project/session:
+
+```bash
+relay init
+```
+
+Interactive prompts:
+- What is this session's role? (free text — e.g. `master`, `backend`, `review the plan for gaps`)
+
+Then automatically:
+- Injects `SessionStart` / `SessionEnd` / `PreToolUse` / `PostToolUse` hooks into `.claude/settings.json`
+- Writes `.mcp.json` with the Relay MCP server URL
+- Injects Relay mesh instructions into `CLAUDE.md`
+
+### 3. Open another session
+
+Open a second Claude Code in any project, run `relay init` with a different role. Both sessions are now in the mesh.
+
+### 4. Discover and connect
+
+Inside Claude Code, use MCP tools:
+
+```
+relay_sessions   → list all active sessions
+relay_send       → send context or a task to a session by role
+relay_read       → read incoming messages
+relay_clarify    → ask for clarification from another role (escalates to master if unresolved)
+```
+
+---
+
+## Session File
+
+Each open session writes a file to `/tmp/relay-sessions/<pid>.json`:
+
+```json
+{
+  "pid": 12345,
+  "workspace": "/home/user/my-project",
+  "tool": "claude-code",
+  "role": "review the plan for gaps and clarity",
+  "goal": "",
+  "done": [],
+  "modified": ["src/auth.rs"],
+  "status": "idle",
+  "started_at": 1719360000
+}
+```
+
+- `status` is updated automatically via hooks (`working` during tool use, `idle` after)
+- `modified` is updated from `git diff HEAD` after each tool use
+- Stale entries (dead PIDs) are cleaned up automatically on `relay session list`
+
+---
+
+## CLI Reference
+
+```bash
+relay init                    # set up relay mesh for this project (interactive)
+relay session list            # list active sessions in the mesh
+relay session write           # manually write session file (called by SessionStart hook)
+relay session delete          # manually delete session file (called by SessionEnd hook)
+relay session status <value>  # update status: "working" or "idle"
+
+# MCP daemon
+relay mcp start               # start MCP server (default port 7777)
+relay mcp stop                # stop MCP server
+relay mcp status              # show daemon status
+relay mcp install             # write MCP config to Claude Code / Codex / Copilot
+relay mcp uninstall           # remove MCP config
+
+relay update                  # update relay binary to latest release
+```
+
+---
+
+## MCP Tools
+
+Available inside Claude Code (and any MCP-compatible agent) once the daemon is running:
+
+| Tool | Description |
+|---|---|
+| `relay_ping` | Health check |
+| `relay_sessions` | List all active sessions with role, workspace, status |
+| `relay_send` | Send a message or context to another session by role |
+| `relay_read` | Read incoming messages for this session |
+| `relay_clarify` | Request clarification from a target role; escalates to master if unresolved |
+| `relay_agents` | List agents that have used the message bus |
+
+---
+
+## Clarification Flow
+
+When a session receives an ambiguous task, it calls `relay_clarify`. Relay routes the question to the target role. If that role cannot answer, it escalates to `master`. If master cannot resolve it either, the user is asked directly.
+
+This keeps sessions from silently guessing — ambiguity surfaces immediately.
 
 ---
 
@@ -89,239 +167,17 @@ cargo install --git https://github.com/itzmail/relay
 curl -fsSL https://raw.githubusercontent.com/itzmail/relay/master/uninstall.sh | sh
 ```
 
-### Windows (PowerShell)
+### Windows
 
 ```powershell
 irm https://raw.githubusercontent.com/itzmail/relay/master/uninstall.ps1 | iex
 ```
 
-### Installed via cargo
+### via cargo
 
 ```bash
 cargo uninstall relay
 ```
-
----
-
-## Quick Start
-
-### 1. Set up Relay for Claude Code
-
-```bash
-# Inject relay instructions into your global CLAUDE.md
-relay setup claude-code --global
-
-# Or project-local only
-relay setup claude-code
-```
-
-This injects orchestration instructions into CLAUDE.md and installs `/relay-init` and `/relay-plan` slash commands into Claude Code.
-
-### 2. Initialize in your project
-
-```bash
-cd your-project
-relay init
-```
-
-Interactive setup — detects which agents are in your PATH, lets you pick which to enable and which model each should use. Creates `relay.config.yaml` in project root.
-
-```
-Checking available agents...
-  ✓ opencode found
-  ✓ codex found
-  ✗ copilot not found in PATH
-
-Select agents to enable:
-  [x] opencode  → model: anthropic/claude-sonnet-4-6
-  [x] codex     → model: o4-mini
-  [ ] copilot   → not installed
-
-relay.config.yaml created.
-```
-
-### 3. Use `/relay-plan` in Claude Code
-
-Open Claude Code and type:
-
-```
-/relay-plan implement user authentication with JWT
-```
-
-Claude Code will:
-1. Break the task into subtasks and assign agents
-2. Show you the plan and ask for approval
-3. Execute all agents in parallel
-4. Review the output and fix anything incorrect
-5. Report results and close
-
----
-
-## CLI Reference
-
-```bash
-relay init                                        # interactive setup
-relay run <agent> --task "<task>" --context "<>" # run agent (blocking, returns JSON)
-relay agent list                                  # list registered agents
-relay agent check                                 # check binary availability in PATH
-relay config show                                 # print relay.config.yaml
-relay setup claude-code [--global]               # inject into CLAUDE.md + install skills
-
-# MCP daemon
-relay mcp start                                  # start MCP daemon (port 7777)
-relay mcp stop                                   # stop MCP daemon
-relay mcp status                                 # show daemon status
-
-# MCP config installer
-relay mcp install                                # interactive — write MCP config to disk
-relay mcp install --yes                          # non-interactive, install all detected agents
-relay mcp install --target claude,codex,copilot # specific agents only
-relay mcp install --dry-run                      # preview changes, no disk write
-relay mcp uninstall                              # remove relay from all agent configs
-relay mcp uninstall --target claude              # remove from specific agent only
-relay mcp uninstall --dry-run                    # preview removal, no disk write
-```
-
-### relay run output
-
-```json
-{
-  "agent": "opencode",
-  "status": "done",
-  "exit_code": 0,
-  "output": "<raw stdout from agent>",
-  "modified_files": ["src/auth.rs", "src/main.rs"]
-}
-```
-
----
-
-## Supported Agents
-
-| Agent | Binary | Install |
-|---|---|---|
-| [OpenCode](https://opencode.ai) | `opencode` | `npm i -g opencode-ai` |
-| [Codex](https://github.com/openai/codex) | `codex` | `npm i -g @openai/codex` |
-| [GitHub Copilot CLI](https://githubnext.com/projects/copilot-cli) | `copilot` | via GitHub CLI extension |
-| [Pi](https://pi.ai) | `pi` | see Pi docs |
-
-You don't need all of them — Relay only uses what you enable in `relay.config.yaml`.
-
----
-
-## How Context Injection Works
-
-When you run `relay run`, Relay prepends your context to the agent's prompt:
-
-```
-[RELAY CONTEXT]
-Goal: <overall goal>
-Done: <what's already done>
-Why: <key decisions made>
-Modified: <files already changed>
-Avoid: <things that failed, don't retry>
-[END CONTEXT]
-
-<your specific task>
-```
-
-Context is written to a temp file under `.relay/`, injected before spawn, deleted after agent exits. No residue left behind.
-
----
-
-## Configuration
-
-`relay.config.yaml` (created by `relay init`):
-
-```yaml
-agents:
-  opencode:
-    command: opencode
-    enabled: true
-    default_model: anthropic/claude-sonnet-4-6
-
-  codex:
-    command: codex
-    enabled: true
-    default_model: o4-mini
-
-  copilot:
-    command: copilot
-    enabled: false
-    default_model: gpt-4o
-```
-
-Override model per-run:
-
-```bash
-relay run opencode --task "refactor auth module" --model anthropic/claude-opus-4-7
-```
-
----
-
-## Claude Code Skills
-
-After `relay setup claude-code`, two slash commands are available:
-
-| Command | What it does |
-|---|---|
-| `/relay-init` | Interactive setup — detect agents, pick models, create config |
-| `/relay-plan` | Full orchestration — plan → approve → parallel execute → review → fix or close |
-
----
-
-## Relay MCP Server
-
-Relay includes an MCP (Model Context Protocol) daemon that exposes tools directly inside Claude Code and other MCP-compatible agents.
-
-### Start the daemon
-
-```bash
-relay mcp start        # starts on port 7777
-relay mcp status       # check if running
-relay mcp stop         # stop daemon
-```
-
-### Connect your agents
-
-```bash
-relay mcp install      # interactive — detects installed agents, writes config files
-relay mcp install --yes --target claude,codex,copilot   # non-interactive
-```
-
-Writes MCP config to:
-| Agent | Config file |
-|---|---|
-| Claude Code | `.mcp.json` (project) or `~/.claude.json` (global) |
-| Codex | `~/.codex/config.toml` |
-| GitHub Copilot CLI | `~/.copilot/mcp-config.json` |
-
-Merge-safe — existing servers preserved. Idempotent — re-run updates URL.
-
-### Remove config
-
-```bash
-relay mcp uninstall                    # remove from all agents
-relay mcp uninstall --target claude    # remove from specific agent
-```
-
-### MCP Tools available to agents
-
-| Tool | Description |
-|---|---|
-| `relay_send` | Send message to another agent |
-| `relay_read` | Read messages in inbox |
-| `relay_agents` | List active agents |
-| `relay_spawn` | Spawn agent for a task |
-| `relay_job_status` | Check job status |
-| `relay_job_logs` | Stream job logs |
-| `relay_job_kill` | Kill a running job |
-
----
-
-## Modified Files Detection
-
-Relay automatically tracks which files changed during agent execution using git diff (before and after spawn). This is always active — assumes the project is a git repository.
 
 ---
 
