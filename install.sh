@@ -60,4 +60,4 @@ else
 fi
 
 echo "relay ${LATEST} installed to ${INSTALL_DIR}/${BIN_NAME}"
-echo "Run 'relay setup claude-code --global' to get started."
+echo "Run 'relay init' in your project to get started."
