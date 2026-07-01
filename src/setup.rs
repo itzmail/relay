@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
-use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
+use serde_json;
 
 const CLAUDE_CODE_MARKER_START: &str = "<!-- relay:start -->";
 const CLAUDE_CODE_MARKER_END: &str = "<!-- relay:end -->";
@@ -184,7 +184,44 @@ Run `relay init` in project root to set up or reconfigure this session.\n\
     )
 }
 
-/// Inject SessionStart/Stop/PreToolUse/PostToolUse hooks into .claude/settings.json
+const RELAY_HOOK_SCRIPT: &str = r#"
+# relay: notify unread messages
+if [ "${RELAY_IGNORE}" = "1" ]; then exit 0; fi
+PROJECT_CWD=$(pwd)
+SESSION_FILE=$(python3 -c "
+import json, os, glob
+sid = os.environ.get('CLAUDE_CODE_SESSION_ID', '')
+cwd = os.environ.get('PROJECT_CWD', '')
+for f in glob.glob(os.path.expanduser('~/.claude/sessions/*.json')):
+    try:
+        d = json.load(open(f))
+        if d.get('sessionId') == sid and d.get('cwd') == cwd:
+            print(f)
+            break
+    except: pass
+" PROJECT_CWD="$PROJECT_CWD" 2>/dev/null)
+if [ -z "$SESSION_FILE" ]; then exit 0; fi
+PID=$(python3 -c "import json,sys; print(json.load(open('$SESSION_FILE'))['pid'])" 2>/dev/null)
+if [ -z "$PID" ]; then exit 0; fi
+FLAG="/tmp/relay-joined/${PID}.join"
+if [ ! -f "$FLAG" ]; then exit 0; fi
+if ! /bin/kill -0 "$PID" 2>/dev/null; then rm -f "$FLAG"; exit 0; fi
+SESSION_NAME=$(python3 -c "import json; d=json.load(open('$SESSION_FILE')); print(d.get('name',''))" 2>/dev/null)
+if [ -z "$SESSION_NAME" ]; then exit 0; fi
+DB="$HOME/.relay/relay.db"
+if [ ! -f "$DB" ]; then exit 0; fi
+UNREAD=$(sqlite3 "$DB" "
+  SELECT COUNT(*) FROM messages m
+  LEFT JOIN agents a ON a.id = '${SESSION_NAME}'
+  WHERE m.id > COALESCE((SELECT last_read_id FROM agents WHERE id = '${SESSION_NAME}'), 0)
+    AND m.from_agent != '${SESSION_NAME}'
+    AND (m.to_agent IS NULL OR m.to_agent = '${SESSION_NAME}')
+" 2>/dev/null || echo 0)
+if [ "$UNREAD" -gt 0 ]; then
+  echo "⚡ relay: ${UNREAD} unread message(s) for \"${SESSION_NAME}\". Call relay_read to process."
+fi
+"#;
+
 pub fn inject_hooks(global: bool) -> Result<()> {
     let settings_path = if global {
         let home = std::env::var("HOME").map_err(|_| anyhow::anyhow!("$HOME not set"))?;
@@ -197,56 +234,31 @@ pub fn inject_hooks(global: bool) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
 
-    let mut root: Value = if settings_path.exists() {
-        serde_json::from_str(&fs::read_to_string(&settings_path)?)?
+    let mut root: serde_json::Value = if settings_path.exists() {
+        let content = fs::read_to_string(&settings_path)?;
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
     } else {
-        json!({})
+        serde_json::json!({})
     };
 
-    let hooks = root.as_object_mut().unwrap();
-    let h = hooks.entry("hooks").or_insert_with(|| json!({}));
-    let h = h.as_object_mut().unwrap();
+    let hooks = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("settings.json root must be object"))?
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
 
-    // SessionStart: write session file
-    h.entry("SessionStart").or_insert_with(|| json!([]));
-    upsert_hook(&mut h["SessionStart"], "relay session write");
+    hooks["UserPromptSubmit"] = serde_json::json!([{
+        "hooks": [{
+            "type": "command",
+            "command": RELAY_HOOK_SCRIPT.trim()
+        }]
+    }]);
 
-    // SessionEnd: delete session file
-    h.entry("SessionEnd").or_insert_with(|| json!([]));
-    upsert_hook(&mut h["SessionEnd"], "relay session delete");
-
-    // PreToolUse: set status working
-    h.entry("PreToolUse").or_insert_with(|| json!([]));
-    upsert_hook(&mut h["PreToolUse"], "relay session status working");
-
-    // PostToolUse: set status idle
-    h.entry("PostToolUse").or_insert_with(|| json!([]));
-    upsert_hook(&mut h["PostToolUse"], "relay session status idle");
-
-    let pretty = serde_json::to_string_pretty(&root)?;
-    let tmp = settings_path.with_extension("tmp");
-    fs::write(&tmp, &pretty)?;
-    fs::rename(&tmp, &settings_path)?;
-
-    println!("  ✓ Injected hooks → {}", settings_path.display());
+    fs::write(&settings_path, serde_json::to_string_pretty(&root)?)?;
+    println!("  ✓ Injected UserPromptSubmit hook → {}", settings_path.display());
     Ok(())
 }
 
-fn upsert_hook(arr: &mut Value, cmd: &str) {
-    let hooks = arr.as_array_mut().unwrap();
-    let already = hooks.iter().any(|h| {
-        h.get("hooks")
-            .and_then(|hs| hs.as_array())
-            .map(|hs| hs.iter().any(|h| h.get("command").and_then(|c| c.as_str()) == Some(cmd)))
-            .unwrap_or(false)
-    });
-    if !already {
-        hooks.push(json!({
-            "matcher": "",
-            "hooks": [{ "type": "command", "command": cmd }]
-        }));
-    }
-}
 
 fn replace_between_markers(content: &str, new_block: &str) -> String {
     let start = content.find(CLAUDE_CODE_MARKER_START);

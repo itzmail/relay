@@ -22,7 +22,7 @@ pub fn install_claude(url: &str, path: &Path, dry_run: bool) -> Result<String> {
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!(".mcp.json root must be object"))?;
     let servers = obj.entry("mcpServers").or_insert_with(|| json!({}));
-    servers["relay"] = json!({ "url": url });
+    servers["relay"] = json!({ "type": "http", "url": url });
 
     let pretty = serde_json::to_string_pretty(&root)?;
     if !dry_run {
@@ -169,6 +169,7 @@ mod tests {
         let path = dir.path().join(".mcp.json");
         install_claude("http://localhost:7777/mcp", &path, false).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["mcpServers"]["relay"]["type"], "http");
         assert_eq!(v["mcpServers"]["relay"]["url"], "http://localhost:7777/mcp");
     }
 
@@ -180,6 +181,7 @@ mod tests {
         install_claude("http://localhost:7777/mcp", &path, false).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["mcpServers"]["github"]["url"], "https://mcp.github.com");
+        assert_eq!(v["mcpServers"]["relay"]["type"], "http");
         assert_eq!(v["mcpServers"]["relay"]["url"], "http://localhost:7777/mcp");
     }
 

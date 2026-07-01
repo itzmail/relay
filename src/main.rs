@@ -43,7 +43,6 @@ enum Commands {
 enum SessionCommands {
     /// Write session file for this process (called by SessionStart hook)
     Write {
-        /// Role/task description for this session
         #[arg(long, default_value = "")]
         role: String,
     },
@@ -51,11 +50,14 @@ enum SessionCommands {
     Delete,
     /// Update session status (called by Pre/PostToolUse hooks)
     Status {
-        /// "working" or "idle"
         value: String,
     },
     /// List active sessions in the mesh
     List,
+    /// Join this project's relay mesh (enables unread message notifications)
+    Join,
+    /// Leave the relay mesh for this project
+    Leave,
 }
 
 #[tokio::main]
@@ -83,12 +85,22 @@ async fn main() -> Result<()> {
                 } else {
                     println!("Active sessions:");
                     for s in &sessions {
+                        let name = if s.name.is_empty() { &s.session_id[..8] } else { s.name.as_str() };
+                        let joined = if session::is_joined(s.pid) { " [joined]" } else { "" };
                         println!(
-                            "  [pid:{}] role=\"{}\" workspace={} status={}",
-                            s.pid, s.role, s.workspace, s.status
+                            "  [pid:{}] name=\"{}\"{} workspace={} status={}",
+                            s.pid, name, joined, s.workspace, s.status
                         );
                     }
                 }
+            }
+            SessionCommands::Join => {
+                let cwd = std::env::current_dir()?.to_string_lossy().to_string();
+                session::join_session(&cwd)?;
+            }
+            SessionCommands::Leave => {
+                let cwd = std::env::current_dir()?.to_string_lossy().to_string();
+                session::leave_session(&cwd)?;
             }
         },
         Commands::Mcp { cmd } => {
@@ -114,15 +126,21 @@ async fn init_interactive() -> Result<()> {
     io::stdin().lock().read_line(&mut role_input)?;
     let role = role_input.trim().to_string();
 
+    print!("Install hooks globally (all projects) or project-only?\n  [1] Global (~/.claude/settings.json)\n  [2] This project only (.claude/settings.json)\n> ");
+    io::stdout().flush()?;
+    let mut scope_input = String::new();
+    io::stdin().lock().read_line(&mut scope_input)?;
+    let global = scope_input.trim() == "1";
+
     println!();
     println!("Injecting Claude Code hooks...");
-    setup::inject_hooks(false)?;
+    setup::inject_hooks(global)?;
 
     println!("Installing MCP config...");
     mcp::cli::install_for_init()?;
 
     println!("Injecting relay mesh instructions into CLAUDE.md...");
-    setup::setup_claude_code(false)?;
+    setup::setup_claude_code(global)?;
 
     std::fs::create_dir_all("/tmp/relay-sessions")?;
 

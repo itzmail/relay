@@ -327,8 +327,8 @@ impl RelayService {
         let target = args.target_role.as_deref().unwrap_or("master");
         let routed_to = sessions
             .iter()
-            .find(|s| s.role.to_lowercase().contains(&target.to_lowercase()))
-            .map(|s| s.role.clone())
+            .find(|s| s.name.to_lowercase().contains(&target.to_lowercase()))
+            .map(|s| s.name.clone())
             .unwrap_or_else(|| "master".to_string());
 
         conn.execute(
