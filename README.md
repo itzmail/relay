@@ -1,30 +1,34 @@
 # Relay
 
-**Relay is a mesh coordinator for AI coding sessions.** Open multiple Claude Code (or other AI coding agent) sessions, connect them via Relay, and share context across all of them.
+**Relay is a mesh coordinator for AI coding sessions.** Open multiple Claude Code sessions, connect them via Relay, and route tasks between them.
 
-Each session has a **role** — master, backend, frontend, reviewer, or any free-text description. Sessions discover each other automatically. Context flows between them via the Relay MCP server.
+Each session has a **name** (set via `/rename` in Claude Code). Sessions discover each other automatically. Context flows between them via the Relay MCP server.
 
 ---
 
 ## How It Works
 
 ```
-You open Claude Code (master)
+You open Claude Code session A
         ↓
-   relay init → sets role, injects hooks + MCP config
+   /rename master       ← name this session
         ↓
-   SessionStart hook fires → writes /tmp/relay-sessions/<pid>.json
+You open Claude Code session B
         ↓
-You open another Claude Code (backend)
+   /rename backend      ← name this session
         ↓
-   relay init → sets role "backend"
+   relay init           ← inject MCP config + hook (run once per project)
         ↓
-   relay_sessions MCP tool → both sessions are now visible to each other
+   relay mcp start      ← start the MCP daemon
+        ↓
+   relay session join   ← attach this session to the mesh
+        ↓
+   relay_sessions MCP tool → both sessions visible to each other
         ↓
    relay_send / relay_read → share context, tasks, clarifications
 ```
 
-Sessions auto-register on open, auto-cleanup on close. No manual wiring.
+Sessions are discovered from Claude Code's native session files (`~/.claude/sessions/`). No hooks required for discovery — just join the mesh when you're ready.
 
 ---
 
@@ -34,12 +38,6 @@ Sessions auto-register on open, auto-cleanup on close. No manual wiring.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/itzmail/relay/master/install.sh | sh
-```
-
-### Windows (PowerShell)
-
-```powershell
-irm https://raw.githubusercontent.com/itzmail/relay/master/install.ps1 | iex
 ```
 
 ### Build from source
@@ -58,71 +56,58 @@ cargo install --git https://github.com/itzmail/relay
 relay mcp start
 ```
 
-### 2. Initialize each session
+### 2. Initialize the project
 
-Run this once per project/session:
+Run once per project:
 
 ```bash
 relay init
 ```
 
-Interactive prompts:
-- What is this session's role? (free text — e.g. `master`, `backend`, `review the plan for gaps`)
-
-Then automatically:
-- Injects `SessionStart` / `SessionEnd` / `PreToolUse` / `PostToolUse` hooks into `.claude/settings.json`
+This:
+- Injects `UserPromptSubmit` hook into `.claude/settings.json` (unread message notifications)
 - Writes `.mcp.json` with the Relay MCP server URL
 - Injects Relay mesh instructions into `CLAUDE.md`
 
-### 3. Open another session
+### 3. Name your sessions
 
-Open a second Claude Code in any project, run `relay init` with a different role. Both sessions are now in the mesh.
+In each Claude Code session, use `/rename` to give it a meaningful name:
+```
+/rename master
+/rename backend
+/rename reviewer
+```
 
-### 4. Discover and connect
+### 4. Join the mesh
+
+In the terminal, from the project directory:
+
+```bash
+relay session join    # attach this Claude session to the mesh
+```
+
+Now other sessions can see you and send you messages. You'll get an `⚡ relay:` notification prepended to your next prompt when unread messages arrive — zero token cost when idle.
+
+### 5. Discover and connect
 
 Inside Claude Code, use MCP tools:
 
 ```
 relay_sessions   → list all active sessions
-relay_send       → send context or a task to a session by role
+relay_send       → send context or a task to a session by name
 relay_read       → read incoming messages
-relay_clarify    → ask for clarification from another role (escalates to master if unresolved)
+relay_clarify    → ask for clarification (escalates to master if unresolved)
 ```
-
----
-
-## Session File
-
-Each open session writes a file to `/tmp/relay-sessions/<pid>.json`:
-
-```json
-{
-  "pid": 12345,
-  "workspace": "/home/user/my-project",
-  "tool": "claude-code",
-  "role": "review the plan for gaps and clarity",
-  "goal": "",
-  "done": [],
-  "modified": ["src/auth.rs"],
-  "status": "idle",
-  "started_at": 1719360000
-}
-```
-
-- `status` is updated automatically via hooks (`working` during tool use, `idle` after)
-- `modified` is updated from `git diff HEAD` after each tool use
-- Stale entries (dead PIDs) are cleaned up automatically on `relay session list`
 
 ---
 
 ## CLI Reference
 
 ```bash
-relay init                    # set up relay mesh for this project (interactive)
-relay session list            # list active sessions in the mesh
-relay session write           # manually write session file (called by SessionStart hook)
-relay session delete          # manually delete session file (called by SessionEnd hook)
-relay session status <value>  # update status: "working" or "idle"
+relay init                    # set up relay mesh for this project
+relay session list            # list active sessions (shows [joined] status)
+relay session join            # join the relay mesh from this project
+relay session leave           # leave the relay mesh
 
 # MCP daemon
 relay mcp start               # start MCP server (default port 7777)
@@ -138,45 +123,41 @@ relay update                  # update relay binary to latest release
 
 ## MCP Tools
 
-Available inside Claude Code (and any MCP-compatible agent) once the daemon is running:
-
 | Tool | Description |
 |---|---|
 | `relay_ping` | Health check |
-| `relay_sessions` | List all active sessions with role, workspace, status |
-| `relay_send` | Send a message or context to another session by role |
+| `relay_sessions` | List all active sessions with name, workspace, status |
+| `relay_send` | Send a message or context to another session by name |
 | `relay_read` | Read incoming messages for this session |
 | `relay_clarify` | Request clarification from a target role; escalates to master if unresolved |
 | `relay_agents` | List agents that have used the message bus |
 
 ---
 
-## Clarification Flow
+## Unread Message Notifications
 
-When a session receives an ambiguous task, it calls `relay_clarify`. Relay routes the question to the target role. If that role cannot answer, it escalates to `master`. If master cannot resolve it either, the user is asked directly.
+When a session has unread messages, the `UserPromptSubmit` hook prepends a one-line notification to the next prompt:
 
-This keeps sessions from silently guessing — ambiguity surfaces immediately.
+```
+⚡ relay: 2 unread message(s) for "backend". Call relay_read to process.
+```
+
+- **Zero token cost** when no messages are pending
+- Only fires for sessions that have run `relay session join`
+- Set `RELAY_IGNORE=1` to disable for a specific session
 
 ---
 
 ## Uninstall
 
-### macOS / Linux
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/itzmail/relay/master/uninstall.sh | sh
 ```
 
-### Windows
-
-```powershell
-irm https://raw.githubusercontent.com/itzmail/relay/master/uninstall.ps1 | iex
-```
-
-### via cargo
+Or manually:
 
 ```bash
-cargo uninstall relay
+rm /usr/local/bin/relay
 ```
 
 ---
