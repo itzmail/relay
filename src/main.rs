@@ -6,6 +6,7 @@ mod mcp;
 mod session;
 mod setup;
 mod updater;
+mod watcher;
 
 #[derive(Parser)]
 #[command(name = "relay", about = "AI coding agent mesh coordinator", version = env!("CARGO_PKG_VERSION"))]
@@ -36,6 +37,19 @@ enum Commands {
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
+    },
+
+    /// Watch for a reply from another session (used after relay_send)
+    Watch {
+        /// Name of the session to watch for a reply FROM
+        #[arg(long)]
+        from: String,
+        /// This session's name (who the reply is addressed to)
+        #[arg(long)]
+        session: String,
+        /// Timeout in seconds (default: 300)
+        #[arg(long, default_value = "300")]
+        timeout: u64,
     },
 }
 
@@ -108,6 +122,9 @@ async fn main() -> Result<()> {
         }
         Commands::Update { yes } => {
             run_update(yes).await?;
+        }
+        Commands::Watch { from, session, timeout } => {
+            watcher::watch(&session, &from, timeout).await?;
         }
     }
 

@@ -59,6 +59,8 @@ pub struct SendArgs {
     pub to: Option<String>,
     pub topic: Option<String>,
     pub payload: String,
+    /// If true, spawns relay watch in background to auto-inject reply into next prompt
+    pub wait_reply: Option<bool>,
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -193,6 +195,19 @@ impl RelayService {
         })?;
 
         let id = conn.last_insert_rowid();
+
+        if args.wait_reply == Some(true) {
+            if let Some(ref to) = args.to {
+                let from = args.from.clone();
+                let session = to.clone();
+                std::thread::spawn(move || {
+                    let _ = std::process::Command::new("relay")
+                        .args(["watch", "--from", &session, "--session", &from, "--timeout", "300"])
+                        .spawn();
+                });
+            }
+        }
+
         Ok(serde_json::to_string(&SendResponse { id, created_at: now }).unwrap())
     }
 

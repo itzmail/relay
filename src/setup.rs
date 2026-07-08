@@ -185,7 +185,7 @@ Run `relay init` in project root to set up or reconfigure this session.\n\
 }
 
 const RELAY_HOOK_SCRIPT: &str = r#"
-# relay: notify unread messages
+# relay: inject pending replies and notify unread messages
 if [ "${RELAY_IGNORE}" = "1" ]; then exit 0; fi
 PROJECT_CWD=$(pwd)
 SESSION_FILE=$(python3 -c "
@@ -208,6 +208,18 @@ if [ ! -f "$FLAG" ]; then exit 0; fi
 if ! /bin/kill -0 "$PID" 2>/dev/null; then rm -f "$FLAG"; exit 0; fi
 SESSION_NAME=$(python3 -c "import json; d=json.load(open('$SESSION_FILE')); print(d.get('name',''))" 2>/dev/null)
 if [ -z "$SESSION_NAME" ]; then exit 0; fi
+# Check for pending reply file (written by relay watch)
+REPLY_FILE="$HOME/.relay/pending-reply-${SESSION_NAME}.txt"
+if [ -f "$REPLY_FILE" ]; then
+  REPLY_CONTENT=$(cat "$REPLY_FILE")
+  rm -f "$REPLY_FILE"
+  python3 -c "
+import json, sys
+content = sys.argv[1]
+print(json.dumps({'hookSpecificOutput': {'additionalContext': content}}))
+" "$REPLY_CONTENT"
+  exit 0
+fi
 DB="$HOME/.relay/relay.db"
 if [ ! -f "$DB" ]; then exit 0; fi
 UNREAD=$(sqlite3 "$DB" "
@@ -218,7 +230,11 @@ UNREAD=$(sqlite3 "$DB" "
     AND (m.to_agent IS NULL OR m.to_agent = '${SESSION_NAME}')
 " 2>/dev/null || echo 0)
 if [ "$UNREAD" -gt 0 ]; then
-  echo "⚡ relay: ${UNREAD} unread message(s) for \"${SESSION_NAME}\". Call relay_read to process."
+  python3 -c "
+import json, sys
+msg = '⚡ relay: {} unread message(s) for \"{}\". Call relay_read to process.'.format(sys.argv[1], sys.argv[2])
+print(json.dumps({'hookSpecificOutput': {'additionalContext': msg}}))
+" "$UNREAD" "$SESSION_NAME"
 fi
 "#;
 
